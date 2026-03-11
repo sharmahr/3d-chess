@@ -175,6 +175,8 @@ class ChessAIEngine {
           const target = board[row + dir]?.[col + dc];
           if (target && target.color === opponentColor) {
             moves.push({ row: row + dir, col: col + dc });
+          } else if (castlingRights.enPassantTarget && row + dir === castlingRights.enPassantTarget.row && col + dc === castlingRights.enPassantTarget.col) {
+            moves.push({ row: row + dir, col: col + dc });
           }
         }
         break;

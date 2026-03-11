@@ -142,6 +142,83 @@ class ChessEngine {
     this.gameState = "active"; // "active", "check", "checkmate", "stalemate"
   }
 
+  getPieceNotation(type) {
+    const notation = {
+      'pawn': '',
+      'knight': 'N',
+      'bishop': 'B',
+      'rook': 'R',
+      'queen': 'Q',
+      'king': 'K'
+    };
+    return notation[type] || '';
+  }
+
+  toAlgebraic(row, col) {
+    const file = String.fromCharCode('a'.charCodeAt(0) + col);
+    const rank = 8 - row;
+    return file + rank;
+  }
+
+  calculateNotation(fromRow, fromCol, toRow, toCol) {
+    const piece = this.getPiece(fromRow, fromCol);
+    if (!piece) return "";
+
+    if (piece.type === "king" && Math.abs(toCol - fromCol) === 2) {
+      return toCol > fromCol ? "O-O" : "O-O-O";
+    }
+
+    let notation = "";
+    if (piece.type !== "pawn") {
+      notation += this.getPieceNotation(piece.type);
+      
+      // Handle disambiguation
+      const others = [];
+      for (let r = 0; r < 8; r++) {
+        for (let c = 0; c < 8; c++) {
+          if (r === fromRow && c === fromCol) continue;
+          const p = this.getPiece(r, c);
+          if (p && p.type === piece.type && p.color === piece.color) {
+            const moves = this.getLegalMoves(r, c);
+            if (moves.some(m => m.row === toRow && m.col === toCol)) {
+              others.push({r, c});
+            }
+          }
+        }
+      }
+
+      if (others.length > 0) {
+        const sameFile = others.some(o => o.c === fromCol);
+        const sameRank = others.some(o => o.r === fromRow);
+        
+        if (!sameFile) {
+          notation += String.fromCharCode('a'.charCodeAt(0) + fromCol);
+        } else if (!sameRank) {
+          notation += (8 - fromRow).toString();
+        } else {
+          notation += String.fromCharCode('a'.charCodeAt(0) + fromCol);
+          notation += (8 - fromRow).toString();
+        }
+      }
+    } else if (this.getPiece(toRow, toCol) || (this.enPassantTarget && toRow === this.enPassantTarget.row && toCol === this.enPassantTarget.col)) {
+      // Pawn capture
+      notation += String.fromCharCode('a'.charCodeAt(0) + fromCol);
+    }
+
+    if (this.getPiece(toRow, toCol) || (piece.type === 'pawn' && this.enPassantTarget && toRow === this.enPassantTarget.row && toCol === this.enPassantTarget.col)) {
+      notation += "x";
+    }
+
+    notation += this.toAlgebraic(toRow, toCol);
+
+    // Promotion
+    if (piece.type === "pawn" && (toRow === 0 || toRow === 7)) {
+      notation += "=Q";
+    }
+
+    return notation;
+  }
+
   setPiece(row, col, piece) {
     this.board[row][col] = piece;
   }
@@ -272,6 +349,8 @@ class ChessEngine {
           const target = this.getPiece(row + dir, col + dc);
           if (target && target.color === opponentColor) {
             moves.push({ row: row + dir, col: col + dc });
+          } else if (this.enPassantTarget && row + dir === this.enPassantTarget.row && col + dc === this.enPassantTarget.col) {
+            moves.push({ row: row + dir, col: col + dc, isEnPassant: true });
           }
         }
         break;
@@ -376,6 +455,8 @@ class ChessEngine {
     const piece = this.getPiece(fromRow, fromCol);
     const target = this.getPiece(toRow, toCol);
     
+    const notation = this.calculateNotation(fromRow, fromCol, toRow, toCol);
+
     // Update castling rights
     if (piece.type === "king") {
       this.castlingRights[piece.color].kingSide = false;
@@ -401,12 +482,45 @@ class ChessEngine {
       }
     }
 
+    // Handle En Passant
+    let enPassantCapture = null;
+    if (piece.type === "pawn" && this.enPassantTarget && toRow === this.enPassantTarget.row && toCol === this.enPassantTarget.col) {
+      const captureRow = piece.color === "white" ? toRow + 1 : toRow - 1;
+      enPassantCapture = { r: captureRow, c: toCol };
+      this.board[captureRow][toCol] = null;
+    }
+
+    // Update enPassantTarget
+    if (piece.type === "pawn" && Math.abs(toRow - fromRow) === 2) {
+      this.enPassantTarget = { row: (fromRow + toRow) / 2, col: fromCol };
+    } else {
+      this.enPassantTarget = null;
+    }
+
+    // Handle Promotion
+    let promotedFrom = null;
+    if (piece.type === "pawn" && (toRow === 0 || toRow === 7)) {
+      promotedFrom = "pawn";
+      piece.type = "queen"; // Default to queen
+    }
+
     this.board[toRow][toCol] = piece;
     this.board[fromRow][fromCol] = null;
     this.turn = this.turn === "white" ? "black" : "white";
 
     this.updateGameState();
-    return { captured: target, castlingRookMove };
+    
+    let finalNotation = notation;
+    if (this.gameState === "checkmate") finalNotation += "#";
+    else if (this.gameState === "check") finalNotation += "+";
+
+    return { 
+      captured: target || (enPassantCapture ? { type: 'pawn', color: this.turn } : null), 
+      castlingRookMove, 
+      enPassantCapture,
+      notation: finalNotation,
+      promotedFrom
+    };
   }
 
   updateGameState() {
@@ -684,6 +798,18 @@ class ChessGameManager {
     this.kingCheckHighlight = null;
     this.thinkingIndicator = null;
     this.titlePieces = [];
+    this.moveHistory = [];
+    this.boardStateHistory = [];
+    this.currentViewIndex = 0;
+    this.isReplaying = false;
+    this.isAutoplaying = false;
+    this.autoplayInterval = 1000;
+    this.autoplaySpeed = 1.0;
+    this.autoplayTimer = null;
+    this.gameStartTime = Date.now();
+    this.hasSavedMatch = false;
+    this.toastMessage = "";
+    this.toastTimer = null;
     
     // UI
     this.hudText = null;
@@ -692,6 +818,7 @@ class ChessGameManager {
     this.setupMaterials();
     this.setupInteraction();
     this.setupAI();
+    this.setupKeyboardShortcuts();
   }
   
   setupMaterials() {
@@ -800,7 +927,12 @@ class ChessGameManager {
     this.isAIThinking = true;
     this.showThinkingIndicator();
     const boardData = this.engine.board.map(row => row.map(p => p ? { type: p.type, color: p.color } : null));
-    this.aiWorker.postMessage({ board: boardData, color: 'black', castlingRights: this.engine.castlingRights, difficulty: this.aiDifficulty });
+    this.aiWorker.postMessage({ 
+      board: boardData, 
+      color: 'black', 
+      castlingRights: { ...this.engine.castlingRights, enPassantTarget: this.engine.enPassantTarget }, 
+      difficulty: this.aiDifficulty 
+    });
   }
 
   executeAIMove(move) {
@@ -846,6 +978,251 @@ class ChessGameManager {
     menuBtn.horizontalAlignment = BABYLON_GUI.Control.HORIZONTAL_ALIGNMENT_RIGHT;
     menuBtn.left = "-20px";
     hudContainer.addControl(menuBtn);
+
+    // Move History Side Panel
+    const historyPanel = new BABYLON_GUI.Rectangle("HistoryPanel");
+    historyPanel.width = "220px";
+    historyPanel.height = "450px";
+    historyPanel.horizontalAlignment = BABYLON_GUI.Control.HORIZONTAL_ALIGNMENT_RIGHT;
+    historyPanel.verticalAlignment = BABYLON_GUI.Control.VERTICAL_ALIGNMENT_CENTER;
+    historyPanel.left = "-20px";
+    historyPanel.top = "-20px";
+    historyPanel.background = "rgba(0, 0, 0, 0.7)";
+    historyPanel.color = "#4CAF50";
+    historyPanel.thickness = 2;
+    historyPanel.cornerRadius = 10;
+    hudContainer.addControl(historyPanel);
+
+    const historyTitle = new BABYLON_GUI.TextBlock();
+    historyTitle.text = "MOVE HISTORY";
+    historyTitle.color = "#4CAF50";
+    historyTitle.fontSize = 18;
+    historyTitle.fontWeight = "bold";
+    historyTitle.top = "-200px";
+    historyPanel.addControl(historyTitle);
+
+    const scrollViewer = new BABYLON_GUI.ScrollViewer("HistoryScroll");
+    scrollViewer.width = "200px";
+    scrollViewer.height = "380px";
+    scrollViewer.top = "20px";
+    scrollViewer.thickness = 0;
+    scrollViewer.color = "#4CAF50";
+    historyPanel.addControl(scrollViewer);
+    this.scrollViewer = scrollViewer;
+
+    this.historyStack = new BABYLON_GUI.StackPanel();
+    this.historyStack.width = "100%";
+    scrollViewer.addControl(this.historyStack);
+
+    // Playback Control Bar
+    const controlBar = new BABYLON_GUI.StackPanel("ControlBar");
+    controlBar.isVertical = false;
+    controlBar.width = "220px";
+    controlBar.height = "40px";
+    controlBar.top = "230px";
+    controlBar.horizontalAlignment = BABYLON_GUI.Control.HORIZONTAL_ALIGNMENT_RIGHT;
+    controlBar.left = "-20px";
+    hudContainer.addControl(controlBar);
+
+    const btnStyle = { width: "40px", height: "30px", color: "white", thickness: 0, fontSize: 16 };
+
+    const firstBtn = BABYLON_GUI.Button.CreateSimpleButton("first", "<<");
+    Object.assign(firstBtn, btnStyle);
+    firstBtn.onPointerClickObservable.add(() => { this.stopAutoplay(); this.animateJumpTo(0); });
+    controlBar.addControl(firstBtn);
+
+    const prevBtn = BABYLON_GUI.Button.CreateSimpleButton("prev", "<");
+    Object.assign(prevBtn, btnStyle);
+    prevBtn.onPointerClickObservable.add(() => { this.stopAutoplay(); this.animateJumpTo(Math.max(0, this.currentViewIndex - 1)); });
+    controlBar.addControl(prevBtn);
+
+    const playPauseText = this.isAutoplaying ? "||" : "▶";
+    const playBtn = BABYLON_GUI.Button.CreateSimpleButton("play", playPauseText);
+    Object.assign(playBtn, btnStyle);
+    playBtn.onPointerClickObservable.add(() => this.toggleAutoplay());
+    controlBar.addControl(playBtn);
+
+    const nextBtn = BABYLON_GUI.Button.CreateSimpleButton("next", ">");
+    Object.assign(nextBtn, btnStyle);
+    nextBtn.onPointerClickObservable.add(() => { this.stopAutoplay(); this.animateJumpTo(Math.min(this.boardStateHistory.length - 1, this.currentViewIndex + 1)); });
+    controlBar.addControl(nextBtn);
+
+    const lastBtn = BABYLON_GUI.Button.CreateSimpleButton("last", ">>");
+    Object.assign(lastBtn, btnStyle);
+    lastBtn.onPointerClickObservable.add(() => { this.stopAutoplay(); this.animateJumpTo(this.boardStateHistory.length - 1); });
+    controlBar.addControl(lastBtn);
+
+    // Speed Selector
+    const speedBar = new BABYLON_GUI.StackPanel("SpeedBar");
+    speedBar.isVertical = false;
+    speedBar.width = "220px";
+    speedBar.height = "30px";
+    speedBar.top = "270px";
+    speedBar.horizontalAlignment = BABYLON_GUI.Control.HORIZONTAL_ALIGNMENT_RIGHT;
+    speedBar.left = "-20px";
+    hudContainer.addControl(speedBar);
+
+    [0.5, 1.0, 2.0].forEach(speed => {
+      const speedBtn = BABYLON_GUI.Button.CreateSimpleButton(`speed_${speed}`, `${speed}x`);
+      speedBtn.width = "60px";
+      speedBtn.height = "25px";
+      speedBtn.color = this.autoplaySpeed === speed ? "#4CAF50" : "white";
+      speedBtn.thickness = 0;
+      speedBtn.fontSize = 13;
+      speedBtn.onPointerClickObservable.add(() => this.setAutoplaySpeed(speed));
+      speedBar.addControl(speedBtn);
+    });
+
+    // Scrub Slider and Move Counter
+    const sliderContainer = new BABYLON_GUI.StackPanel("SliderContainer");
+    sliderContainer.width = "220px";
+    sliderContainer.height = "60px";
+    sliderContainer.top = "320px";
+    sliderContainer.horizontalAlignment = BABYLON_GUI.Control.HORIZONTAL_ALIGNMENT_RIGHT;
+    sliderContainer.left = "-20px";
+    hudContainer.addControl(sliderContainer);
+
+    this.moveCounterText = new BABYLON_GUI.TextBlock();
+    this.moveCounterText.text = `Move 0 / 0`;
+    this.moveCounterText.color = "white";
+    this.moveCounterText.fontSize = 14;
+    this.moveCounterText.height = "25px";
+    sliderContainer.addControl(this.moveCounterText);
+
+    this.scrubSlider = new BABYLON_GUI.Slider();
+    this.scrubSlider.minimum = 0;
+    this.scrubSlider.maximum = Math.max(0, this.boardStateHistory.length - 1);
+    this.scrubSlider.value = this.currentViewIndex;
+    this.scrubSlider.height = "20px";
+    this.scrubSlider.width = "200px";
+    this.scrubSlider.color = "#4CAF50";
+    this.scrubSlider.background = "rgba(255, 255, 255, 0.2)";
+    this.scrubSlider.borderColor = "transparent";
+    this.scrubSlider.onValueChangedObservable.add((value) => {
+      const targetIndex = Math.round(value);
+      if (targetIndex !== this.currentViewIndex && this.boardStateHistory[targetIndex]) {
+        this.stopAutoplay();
+        this.currentViewIndex = targetIndex;
+        this.loadSnapshot(this.boardStateHistory[targetIndex]);
+      }
+    });
+    sliderContainer.addControl(this.scrubSlider);
+
+    this.updateMoveHistoryUI();
+
+    // Replay Mode Indicator
+    this.replayIndicator = new BABYLON_GUI.Rectangle("ReplayIndicator");
+    this.replayIndicator.width = "180px";
+    this.replayIndicator.height = "40px";
+    this.replayIndicator.horizontalAlignment = BABYLON_GUI.Control.HORIZONTAL_ALIGNMENT_LEFT;
+    this.replayIndicator.verticalAlignment = BABYLON_GUI.Control.VERTICAL_ALIGNMENT_TOP;
+    this.replayIndicator.left = "20px";
+    this.replayIndicator.top = "20px";
+    this.replayIndicator.background = "rgba(255, 152, 0, 0.8)";
+    this.replayIndicator.cornerRadius = 5;
+    this.replayIndicator.thickness = 0;
+    this.replayIndicator.isVisible = false;
+    hudContainer.addControl(this.replayIndicator);
+
+    const replayText = new BABYLON_GUI.TextBlock();
+    replayText.text = "REPLAY MODE";
+    replayText.color = "white";
+    replayText.fontSize = 18;
+    replayText.fontWeight = "bold";
+    this.replayIndicator.addControl(replayText);
+
+    // Board Overlay Border
+    this.boardBorder = new BABYLON_GUI.Rectangle("BoardBorder");
+    this.boardBorder.width = "100%";
+    this.boardBorder.height = "100%";
+    this.boardBorder.thickness = 15;
+    this.boardBorder.color = "rgba(255, 152, 0, 0.3)";
+    this.boardBorder.isVisible = false;
+    this.boardBorder.isHitTestVisible = false;
+    hudContainer.addControl(this.boardBorder);
+
+    // Toast Notification
+    this.toastContainer = new BABYLON_GUI.Rectangle("ToastContainer");
+    this.toastContainer.width = "260px";
+    this.toastContainer.height = "50px";
+    this.toastContainer.horizontalAlignment = BABYLON_GUI.Control.HORIZONTAL_ALIGNMENT_RIGHT;
+    this.toastContainer.verticalAlignment = BABYLON_GUI.Control.VERTICAL_ALIGNMENT_BOTTOM;
+    this.toastContainer.left = "-20px";
+    this.toastContainer.top = "-20px";
+    this.toastContainer.background = "rgba(76, 175, 80, 0.9)";
+    this.toastContainer.cornerRadius = 6;
+    this.toastContainer.thickness = 0;
+    this.toastContainer.isVisible = false;
+    hudContainer.addControl(this.toastContainer);
+
+    this.toastText = new BABYLON_GUI.TextBlock();
+    this.toastText.text = "";
+    this.toastText.color = "white";
+    this.toastText.fontSize = 16;
+    this.toastText.fontWeight = "bold";
+    this.toastContainer.addControl(this.toastText);
+  }
+
+  updateMoveHistoryUI(currentMoveIndex = this.moveHistory.length - 1) {
+    if (!this.historyStack) return;
+    this.historyStack.clearControls();
+
+    for (let i = 0; i < this.moveHistory.length; i += 2) {
+      const moveIndex = Math.floor(i / 2) + 1;
+      const whiteMove = this.moveHistory[i];
+      const blackMove = this.moveHistory[i + 1] || "";
+
+      const row = new BABYLON_GUI.StackPanel();
+      row.isVertical = false;
+      row.height = "35px";
+      row.width = "100%";
+
+      const indexText = new BABYLON_GUI.TextBlock();
+      indexText.text = `${moveIndex}.`;
+      indexText.width = "40px";
+      indexText.color = "#888";
+      indexText.fontSize = 14;
+      indexText.textHorizontalAlignment = BABYLON_GUI.Control.HORIZONTAL_ALIGNMENT_LEFT;
+      indexText.paddingLeft = "10px";
+      row.addControl(indexText);
+
+      const whiteMoveBtn = BABYLON_GUI.Button.CreateSimpleButton("whiteMove", whiteMove);
+      whiteMoveBtn.width = "75px";
+      whiteMoveBtn.height = "30px";
+      whiteMoveBtn.color = i === currentMoveIndex ? "#4CAF50" : "white";
+      whiteMoveBtn.thickness = 0;
+      whiteMoveBtn.fontSize = 15;
+      whiteMoveBtn.hoverCursor = "pointer";
+      whiteMoveBtn.onPointerEnterObservable.add(() => { whiteMoveBtn.background = "rgba(255,255,255,0.1)"; });
+      whiteMoveBtn.onPointerOutObservable.add(() => { whiteMoveBtn.background = "transparent"; });
+      whiteMoveBtn.onPointerClickObservable.add(() => {
+        this.animateJumpTo(i + 1);
+      });
+      row.addControl(whiteMoveBtn);
+
+      if (blackMove) {
+        const blackMoveBtn = BABYLON_GUI.Button.CreateSimpleButton("blackMove", blackMove);
+        blackMoveBtn.width = "75px";
+        blackMoveBtn.height = "30px";
+        blackMoveBtn.color = i + 1 === currentMoveIndex ? "#4CAF50" : "white";
+        blackMoveBtn.thickness = 0;
+        blackMoveBtn.fontSize = 15;
+        blackMoveBtn.hoverCursor = "pointer";
+        blackMoveBtn.onPointerEnterObservable.add(() => { blackMoveBtn.background = "rgba(255,255,255,0.1)"; });
+        blackMoveBtn.onPointerOutObservable.add(() => { blackMoveBtn.background = "transparent"; });
+        blackMoveBtn.onPointerClickObservable.add(() => {
+          this.animateJumpTo(i + 2);
+        });
+        row.addControl(blackMoveBtn);
+      }
+
+      this.historyStack.addControl(row);
+    }
+
+    // Autoscroll to latest move
+    if (this.scrollViewer) {
+      this.scrollViewer.verticalBar.value = 1;
+    }
   }
 
   updateHUD() {
@@ -856,6 +1233,26 @@ class ChessGameManager {
     if (this.hudText) this.hudText.text = status;
     this.clearCheckHighlight();
     if (this.engine.gameState === "check" || this.engine.gameState === "checkmate") this.showCheckHighlight();
+
+    const isLatestMove = this.currentViewIndex === this.boardStateHistory.length - 1;
+    if (this.moveCounterText) {
+      this.moveCounterText.text = `Move ${this.currentViewIndex} / ${this.boardStateHistory.length - 1}`;
+    }
+    if (this.scrubSlider) {
+      this.scrubSlider.maximum = Math.max(0, this.boardStateHistory.length - 1);
+      this.scrubSlider.value = this.currentViewIndex;
+    }
+
+    // Toggle Replay Mode UI
+    if (this.replayIndicator) this.replayIndicator.isVisible = !isLatestMove;
+    if (this.boardBorder) this.boardBorder.isVisible = !isLatestMove;
+
+    if (isLatestMove && this.engine.gameState === "checkmate") {
+      const result = this.engine.turn === "white" ? "0-1" : "1-0";
+      this.saveMatch(result);
+    } else if (isLatestMove && this.engine.gameState === "stalemate") {
+      this.saveMatch("1/2-1/2");
+    }
   }
 
   showCheckHighlight() {
@@ -885,11 +1282,63 @@ class ChessGameManager {
     this.engine.setPiece(row, col, { type, color: isWhite ? "white" : "black" });
     mesh.metadata = { pieceKey: key, type, isWhite, row, col };
   }
+
+  takeSnapshot(moveDetails = null) {
+    const boardSnapshot = this.engine.board.map(row => row.map(piece => piece ? { ...piece } : null));
+    return {
+      board: boardSnapshot,
+      turn: this.engine.turn,
+      castlingRights: JSON.parse(JSON.stringify(this.engine.castlingRights)),
+      enPassantTarget: this.engine.enPassantTarget ? { ...this.engine.enPassantTarget } : null,
+      gameState: this.engine.gameState,
+      moveHistory: [...this.moveHistory],
+      moveDetails: moveDetails
+    };
+  }
+
+  loadSnapshot(snapshot) {
+    // Clear current pieces
+    this.pieces.forEach(p => p.mesh.dispose());
+    this.pieces.clear();
+    this.deselectPiece();
+    this.clearCheckHighlight();
+
+    // Restore engine state
+    this.engine.board = snapshot.board.map(row => row.map(piece => piece ? { ...piece } : null));
+    this.engine.turn = snapshot.turn;
+    this.engine.castlingRights = JSON.parse(JSON.stringify(snapshot.castlingRights));
+    this.engine.enPassantTarget = snapshot.enPassantTarget ? { ...snapshot.enPassantTarget } : null;
+    this.engine.gameState = snapshot.gameState;
+
+    // Recreate meshes
+    for (let row = 0; row < 8; row++) {
+      for (let col = 0; col < 8; col++) {
+        const pieceData = this.engine.board[row][col];
+        if (pieceData) {
+          const isWhite = pieceData.color === "white";
+          const material = isWhite ? this.whitePieceMat : this.blackPieceMat;
+          const pieceMesh = createChessPiece(pieceData.type, this.scene, material, this.shadowGenerator);
+          
+          const pos = this.getSquarePosition(row, col);
+          pieceMesh.position.set(pos.x, 0, pos.z);
+          if (!isWhite) pieceMesh.rotation.y = Math.PI;
+          
+          const key = `${row},${col}`;
+          this.pieces.set(key, { mesh: pieceMesh, type: pieceData.type, isWhite, row, col });
+          pieceMesh.metadata = { pieceKey: key, type: pieceData.type, isWhite, row, col };
+        }
+      }
+    }
+
+    this.updateHUD();
+    this.updateMoveHistoryUI(snapshot.moveHistory.length - 1);
+  }
   
   setupInteraction() {
     this.scene.onPointerObservable.add((pointerInfo) => {
       if (pointerInfo.type === BABYLON.PointerEventTypes.POINTERDOWN) {
-        if (this.uiManager.currentPhase !== "playing" || this.isAIThinking) return;
+        if (this.uiManager.currentPhase !== "playing" || this.isAIThinking || this.isReplaying) return;
+        if (this.currentViewIndex !== this.boardStateHistory.length - 1) return;
         if (this.engine.gameState === "checkmate" || this.engine.gameState === "stalemate") return;
         if (this.engine.turn !== this.playerColor) return;
 
@@ -996,12 +1445,29 @@ class ChessGameManager {
     const piece = this.selectedPiece;
     const oldRow = piece.row;
     const oldCol = piece.col;
-    const { captured, castlingRookMove } = this.engine.makeMove(oldRow, oldCol, targetRow, targetCol);
+    const { captured, castlingRookMove, enPassantCapture, notation, promotedFrom } = this.engine.makeMove(oldRow, oldCol, targetRow, targetCol);
     
+    // Add to history
+    this.moveHistory.push(notation);
+    this.updateMoveHistoryUI();
+
+    const moveDetails = { 
+      from: { r: oldRow, c: oldCol }, 
+      to: { r: targetRow, c: targetCol }, 
+      captured, 
+      castlingRookMove, 
+      enPassantCapture, 
+      notation, 
+      promotedFrom 
+    };
+
     if (captured) {
-      const capturedPiece = this.pieces.get(`${targetRow},${targetCol}`);
-      this.animateCapture(capturedPiece);
-      this.pieces.delete(`${targetRow},${targetCol}`);
+      const capturedKey = enPassantCapture ? `${enPassantCapture.r},${enPassantCapture.c}` : `${targetRow},${targetCol}`;
+      const capturedPiece = this.pieces.get(capturedKey);
+      if (capturedPiece) {
+        this.animateCapture(capturedPiece);
+        this.pieces.delete(capturedKey);
+      }
     }
 
     // Handle visual rook move for castling
@@ -1021,11 +1487,24 @@ class ChessGameManager {
       this.pieces.delete(`${oldRow},${oldCol}`);
       piece.row = targetRow;
       piece.col = targetCol;
+
+      // Visual promotion
+      if (promotedFrom) {
+        const material = piece.isWhite ? this.whitePieceMat : this.blackPieceMat;
+        const newMesh = createChessPiece("queen", this.scene, material, this.shadowGenerator);
+        newMesh.position.copyFrom(piece.mesh.position);
+        piece.mesh.dispose();
+        piece.mesh = newMesh;
+        piece.type = "queen";
+      }
+
       piece.mesh.metadata.row = targetRow;
       piece.mesh.metadata.col = targetCol;
       piece.mesh.metadata.pieceKey = `${targetRow},${targetCol}`;
       this.pieces.set(`${targetRow},${targetCol}`, piece);
       
+      this.boardStateHistory.push(this.takeSnapshot(moveDetails));
+      this.currentViewIndex = this.boardStateHistory.length - 1;
       this.deselectPiece();
       this.updateHUD();
       
@@ -1036,21 +1515,288 @@ class ChessGameManager {
     });
   }
   
-  animateMove(piece, targetRow, targetCol, onComplete) {
+  animateMove(piece, targetRow, targetCol, onComplete, durationFactor = 1.0) {
     const targetPos = this.getSquarePosition(targetRow, targetCol);
     const mesh = piece.mesh;
     const frameRate = 60;
     
-    BABYLON.Animation.CreateAndStartAnimation("moveLift", mesh, "position.y", frameRate, 12, mesh.position.y, 0.8, BABYLON.Animation.ANIMATIONLOOPMODE_CONSTANT, new BABYLON.QuadraticEase());
+    const liftDuration = 12 * durationFactor;
+    const travelDuration = 18 * durationFactor;
+    const descendDuration = 12 * durationFactor;
+    
+    BABYLON.Animation.CreateAndStartAnimation("moveLift", mesh, "position.y", frameRate, liftDuration, mesh.position.y, 0.8, BABYLON.Animation.ANIMATIONLOOPMODE_CONSTANT, new BABYLON.QuadraticEase());
     
     setTimeout(() => {
-      BABYLON.Animation.CreateAndStartAnimation("moveX", mesh, "position.x", frameRate, 18, mesh.position.x, targetPos.x, BABYLON.Animation.ANIMATIONLOOPMODE_CONSTANT, new BABYLON.QuadraticEase());
-      BABYLON.Animation.CreateAndStartAnimation("moveZ", mesh, "position.z", frameRate, 18, mesh.position.z, targetPos.z, BABYLON.Animation.ANIMATIONLOOPMODE_CONSTANT, new BABYLON.QuadraticEase());
+      BABYLON.Animation.CreateAndStartAnimation("moveX", mesh, "position.x", frameRate, travelDuration, mesh.position.x, targetPos.x, BABYLON.Animation.ANIMATIONLOOPMODE_CONSTANT, new BABYLON.QuadraticEase());
+      BABYLON.Animation.CreateAndStartAnimation("moveZ", mesh, "position.z", frameRate, travelDuration, mesh.position.z, targetPos.z, BABYLON.Animation.ANIMATIONLOOPMODE_CONSTANT, new BABYLON.QuadraticEase());
       
       setTimeout(() => {
-        BABYLON.Animation.CreateAndStartAnimation("moveDescend", mesh, "position.y", frameRate, 12, 0.8, 0, BABYLON.Animation.ANIMATIONLOOPMODE_CONSTANT, new BABYLON.QuadraticEase(), onComplete);
-      }, 300);
-    }, 200);
+        BABYLON.Animation.CreateAndStartAnimation("moveDescend", mesh, "position.y", frameRate, descendDuration, 0.8, 0, BABYLON.Animation.ANIMATIONLOOPMODE_CONSTANT, new BABYLON.QuadraticEase(), onComplete);
+      }, 300 * durationFactor);
+    }, 200 * durationFactor);
+  }
+
+  async animateJumpTo(targetIndex) {
+    if (this.isReplaying || targetIndex === this.currentViewIndex) return;
+    this.isReplaying = true;
+    this.deselectPiece();
+
+    const forward = targetIndex > this.currentViewIndex;
+
+    while (this.currentViewIndex !== targetIndex) {
+      if (forward) {
+        await this.replayNextMove();
+      } else {
+        await this.replayPreviousMove();
+      }
+    }
+
+    this.isReplaying = false;
+    this.updateMoveHistoryUI(this.currentViewIndex - 1);
+    this.updateHUD();
+  }
+
+  replayNextMove() {
+    return new Promise((resolve) => {
+      this.currentViewIndex++;
+      const snapshot = this.boardStateHistory[this.currentViewIndex];
+      const { from, to, captured, castlingRookMove, enPassantCapture, promotedFrom } = snapshot.moveDetails;
+      
+      const piece = this.pieces.get(`${from.r},${from.c}`);
+      
+      if (captured) {
+        const capturedKey = enPassantCapture ? `${enPassantCapture.r},${enPassantCapture.c}` : `${to.r},${to.c}`;
+        const capturedPiece = this.pieces.get(capturedKey);
+        if (capturedPiece) {
+          this.animateCapture(capturedPiece);
+          this.pieces.delete(capturedKey);
+        }
+      }
+
+      if (castlingRookMove) {
+        const rook = this.pieces.get(`${castlingRookMove.from.r},${castlingRookMove.from.c}`);
+        this.animateMove(rook, castlingRookMove.to.r, castlingRookMove.to.c, null, 0.3);
+        this.pieces.delete(`${castlingRookMove.from.r},${castlingRookMove.from.c}`);
+        this.pieces.set(`${castlingRookMove.to.r},${castlingRookMove.to.c}`, rook);
+        rook.row = castlingRookMove.to.r; rook.col = castlingRookMove.to.c;
+        rook.mesh.metadata.pieceKey = `${rook.row},${rook.col}`;
+      }
+
+      this.animateMove(piece, to.r, to.c, () => {
+        this.pieces.delete(`${from.r},${from.c}`);
+        piece.row = to.r; piece.col = to.c;
+        if (promotedFrom) {
+          const material = piece.isWhite ? this.whitePieceMat : this.blackPieceMat;
+          const newMesh = createChessPiece("queen", this.scene, material, this.shadowGenerator);
+          newMesh.position.copyFrom(piece.mesh.position);
+          piece.mesh.dispose();
+          piece.mesh = newMesh;
+          piece.type = "queen";
+        }
+        piece.mesh.metadata.pieceKey = `${to.r},${to.c}`;
+        this.pieces.set(`${to.r},${to.c}`, piece);
+        
+        this.syncEngineWithSnapshot(snapshot);
+        resolve();
+      }, 0.3);
+    });
+  }
+
+  replayPreviousMove() {
+    return new Promise((resolve) => {
+      const currentSnapshot = this.boardStateHistory[this.currentViewIndex];
+      const { from, to, captured, castlingRookMove, enPassantCapture, promotedFrom } = currentSnapshot.moveDetails;
+      this.currentViewIndex--;
+      const snapshot = this.boardStateHistory[this.currentViewIndex];
+
+      const piece = this.pieces.get(`${to.r},${to.c}`);
+      
+      if (castlingRookMove) {
+        const rook = this.pieces.get(`${castlingRookMove.to.r},${castlingRookMove.to.c}`);
+        this.animateMove(rook, castlingRookMove.from.r, castlingRookMove.from.c, null, 0.3);
+        this.pieces.delete(`${castlingRookMove.to.r},${castlingRookMove.to.c}`);
+        this.pieces.set(`${castlingRookMove.from.r},${castlingRookMove.from.c}`, rook);
+        rook.row = castlingRookMove.from.r; rook.col = castlingRookMove.from.c;
+        rook.mesh.metadata.pieceKey = `${rook.row},${rook.col}`;
+      }
+
+      this.animateMove(piece, from.r, from.c, () => {
+        this.pieces.delete(`${to.r},${to.c}`);
+        piece.row = from.r; piece.col = from.c;
+        
+        if (promotedFrom) {
+          const material = piece.isWhite ? this.whitePieceMat : this.blackPieceMat;
+          const newMesh = createChessPiece("pawn", this.scene, material, this.shadowGenerator);
+          newMesh.position.copyFrom(piece.mesh.position);
+          piece.mesh.dispose();
+          piece.mesh = newMesh;
+          piece.type = "pawn";
+        }
+        
+        piece.mesh.metadata.pieceKey = `${from.r},${from.c}`;
+        this.pieces.set(`${from.r},${from.c}`, piece);
+
+        if (captured) {
+          const capPos = enPassantCapture ? enPassantCapture : to;
+          const isWhite = captured.color === "white";
+          const material = isWhite ? this.whitePieceMat : this.blackPieceMat;
+          const capPieceMesh = createChessPiece(captured.type, this.scene, material, this.shadowGenerator);
+          
+          const finalPos = this.getSquarePosition(capPos.r, capPos.c);
+          capPieceMesh.position.set(finalPos.x, -2, finalPos.z);
+          if (!isWhite) capPieceMesh.rotation.y = Math.PI;
+          
+          BABYLON.Animation.CreateAndStartAnimation("reappear", capPieceMesh, "position.y", 60, 12, -2, 0, BABYLON.Animation.ANIMATIONLOOPMODE_CONSTANT, new BABYLON.QuadraticEase());
+          
+          const key = `${capPos.r},${capPos.c}`;
+          this.pieces.set(key, { mesh: capPieceMesh, type: captured.type, isWhite, row: capPos.r, col: capPos.c });
+          capPieceMesh.metadata = { pieceKey: key, type: captured.type, isWhite, row: capPos.r, col: capPos.c };
+        }
+
+        this.syncEngineWithSnapshot(snapshot);
+        resolve();
+      }, 0.3);
+    });
+  }
+
+  syncEngineWithSnapshot(snapshot) {
+    this.engine.board = snapshot.board.map(row => row.map(piece => piece ? { ...piece } : null));
+    this.engine.turn = snapshot.turn;
+    this.engine.castlingRights = JSON.parse(JSON.stringify(snapshot.castlingRights));
+    this.engine.enPassantTarget = snapshot.enPassantTarget ? { ...snapshot.enPassantTarget } : null;
+    this.engine.gameState = snapshot.gameState;
+  }
+
+  showToast(message) {
+    if (!this.toastContainer || !this.toastText) return;
+    this.toastText.text = message;
+    this.toastContainer.isVisible = true;
+    if (this.toastTimer) {
+      clearTimeout(this.toastTimer);
+    }
+    this.toastTimer = setTimeout(() => {
+      this.toastContainer.isVisible = false;
+    }, 3000);
+  }
+
+  buildPGN(result) {
+    const now = new Date();
+    const dateString = `${now.getFullYear()}.${String(now.getMonth() + 1).padStart(2, "0")}.${String(now.getDate()).padStart(2, "0")}`;
+    const header = [
+      `[Event "3D Chess"]`,
+      `[Site "Local"]`,
+      `[Date "${dateString}"]`,
+      `[White "${this.uiManager.user.name}"]`,
+      `[Black "AI"]`,
+      `[Result "${result}"]`
+    ];
+
+    const moves = [];
+    for (let i = 0; i < this.moveHistory.length; i += 2) {
+      const moveNumber = Math.floor(i / 2) + 1;
+      const whiteMove = this.moveHistory[i] || "";
+      const blackMove = this.moveHistory[i + 1] || "";
+      if (blackMove) {
+        moves.push(`${moveNumber}. ${whiteMove} ${blackMove}`.trim());
+      } else {
+        moves.push(`${moveNumber}. ${whiteMove}`.trim());
+      }
+    }
+
+    return `${header.join("\n")}\n\n${moves.join(" ")} ${result}`;
+  }
+
+  async saveMatch(result) {
+    if (this.hasSavedMatch) return;
+    this.hasSavedMatch = true;
+    const pgn = this.buildPGN(result);
+    const durationSeconds = Math.floor((Date.now() - this.gameStartTime) / 1000);
+    const payload = {
+      pgn,
+      result,
+      player_username: this.uiManager.user.name,
+      ai_difficulty: this.aiDifficulty,
+      total_moves: this.moveHistory.length,
+      duration_seconds: durationSeconds
+    };
+
+    try {
+      const response = await fetch("/matches/save", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      });
+      if (response.ok) {
+        this.showToast("Game saved");
+      }
+    } catch (error) {
+      console.error("Failed to save match", error);
+    }
+  }
+
+  toggleAutoplay() {
+    if (this.isAutoplaying) {
+      this.stopAutoplay();
+    } else {
+      this.startAutoplay();
+    }
+    this.updateHUD();
+  }
+
+  startAutoplay() {
+    if (this.currentViewIndex >= this.boardStateHistory.length - 1) {
+      this.animateJumpTo(0).then(() => {
+        this.isAutoplaying = true;
+        this.autoplayNext();
+      });
+    } else {
+      this.isAutoplaying = true;
+      this.autoplayNext();
+    }
+  }
+
+  stopAutoplay() {
+    this.isAutoplaying = false;
+    if (this.autoplayTimer) {
+      clearTimeout(this.autoplayTimer);
+      this.autoplayTimer = null;
+    }
+    this.updateHUD();
+  }
+
+  async autoplayNext() {
+    if (!this.isAutoplaying) return;
+
+    if (this.currentViewIndex < this.boardStateHistory.length - 1) {
+      await this.animateJumpTo(this.currentViewIndex + 1);
+      this.autoplayTimer = setTimeout(() => this.autoplayNext(), this.autoplayInterval / this.autoplaySpeed);
+    } else {
+      this.stopAutoplay();
+    }
+  }
+
+  setAutoplaySpeed(speed) {
+    this.autoplaySpeed = speed;
+    this.setupHUD(); // Re-setup to update speed button colors
+  }
+
+  setupKeyboardShortcuts() {
+    this.scene.onKeyboardObservable.add((kbInfo) => {
+      if (this.uiManager.currentPhase !== "playing") return;
+      
+      if (kbInfo.type === BABYLON.KeyboardEventTypes.KEYDOWN) {
+        if (kbInfo.event.key === "ArrowLeft") {
+          this.stopAutoplay();
+          this.animateJumpTo(Math.max(0, this.currentViewIndex - 1));
+        } else if (kbInfo.event.key === "ArrowRight") {
+          this.stopAutoplay();
+          this.animateJumpTo(Math.min(this.boardStateHistory.length - 1, this.currentViewIndex + 1));
+        } else if (kbInfo.event.key === " ") {
+          kbInfo.event.preventDefault();
+          this.toggleAutoplay();
+        }
+      }
+    });
   }
   
   animateCapture(targetPiece) {
@@ -1074,6 +1820,10 @@ class ChessGameManager {
     this.pieces.forEach(p => p.mesh.dispose());
     this.pieces.clear();
     this.engine = new ChessEngine(); // Reset engine state
+    this.moveHistory = [];
+    this.boardStateHistory = [];
+    this.gameStartTime = Date.now();
+    this.hasSavedMatch = false;
 
     const layout = [
       ["rook", "knight", "bishop", "queen", "king", "bishop", "knight", "rook"],
@@ -1101,6 +1851,7 @@ class ChessGameManager {
         }
       }
     }
+    this.boardStateHistory = [this.takeSnapshot()];
     this.updateHUD();
   }
 }
