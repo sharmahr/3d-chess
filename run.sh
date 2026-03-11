@@ -3,7 +3,7 @@
 #
 # 1. Kills any previously running backend/frontend processes.
 # 2. Finds an available port for the backend, starts uvicorn.
-# 3. Finds an available port for the frontend, starts vite dev server
+# 3. Finds an available port for the frontend, starts webpack dev server
 #    with a proxy pointing at the backend.
 # 4. Prints the URL (compatible with VS Code port forwarding).
 
@@ -24,7 +24,7 @@ fi
 # Docker-friendly defaults; override with env vars.
 # Set BACKEND_PORT=auto or FRONTEND_PORT=auto to request dynamic assignment.
 BACKEND_PORT="${BACKEND_PORT:-8000}"
-FRONTEND_PORT="${FRONTEND_PORT:-5173}"
+FRONTEND_PORT="${FRONTEND_PORT:-3000}"
 
 # Find an available TCP port by briefly binding to port 0.
 find_available_port() {
@@ -50,8 +50,8 @@ kill_matching() {
 
 echo "=== Stopping existing services ==="
 kill_matching "uvicorn app.main:app"
-kill_matching "vite.*hello-world-game"
-kill_matching "node.*vite.*frontend"
+kill_matching "webpack.*hello-world-game"
+kill_matching "node.*webpack.*frontend"
 
 if [[ "$BACKEND_PORT" == "auto" ]]; then
   BACKEND_PORT=$(find_available_port)
@@ -92,10 +92,10 @@ for i in $(seq 1 20); do
 done
 
 echo ""
-echo "=== Starting frontend (Vite dev server) ==="
+echo "=== Starting frontend (Webpack dev server) ==="
 cd "$SCRIPT_DIR/frontend"
-VITE_API_URL="http://localhost:${BACKEND_PORT}" \
-  npx vite --host 0.0.0.0 --port "$FRONTEND_PORT" &
+WEBPACK_API_URL="http://localhost:${BACKEND_PORT}" \
+  npx webpack serve --mode development --port "$FRONTEND_PORT" &
 FRONTEND_PID=$!
 echo "Frontend PID: $FRONTEND_PID"
 

@@ -6,7 +6,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 IMAGE_NAME="${IMAGE_NAME:-hello-world-game:test}"
 CONTAINER_NAME="${CONTAINER_NAME:-hello-world-game-test}"
 
-PREFERRED_FRONTEND_PORT="${HOST_FRONTEND_PORT:-5173}"
+PREFERRED_FRONTEND_PORT="${HOST_FRONTEND_PORT:-3000}"
 PREFERRED_BACKEND_PORT="${HOST_BACKEND_PORT:-8000}"
 
 find_free_port() {
@@ -43,10 +43,16 @@ pick_host_port() {
   done
 }
 
+# Always build the image to ensure it's up to date
+echo "Building Docker image '$IMAGE_NAME'..."
+docker build --no-cache -t "$IMAGE_NAME" "$SCRIPT_DIR"
+echo "Image built successfully."
+echo
+
 HOST_FRONTEND_PORT="$(pick_host_port "$PREFERRED_FRONTEND_PORT")"
 HOST_BACKEND_PORT="$(pick_host_port "$PREFERRED_BACKEND_PORT")"
 
-echo "Using host frontend port: ${HOST_FRONTEND_PORT} (container 5173)"
+echo "Using host frontend port: ${HOST_FRONTEND_PORT} (container 3000)"
 echo "Using host backend port:  ${HOST_BACKEND_PORT} (container 8000)"
 
 cd "$SCRIPT_DIR"
@@ -55,7 +61,7 @@ docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
 
 docker run -d \
   --name "$CONTAINER_NAME" \
-  -p "${HOST_FRONTEND_PORT}:5173" \
+  -p "${HOST_FRONTEND_PORT}:3000" \
   -p "${HOST_BACKEND_PORT}:8000" \
   "$IMAGE_NAME" >/dev/null
 

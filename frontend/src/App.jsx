@@ -1397,6 +1397,15 @@ export default function App() {
     // Cleanup
     return () => {
       window.removeEventListener("resize", handleResize);
+      engine.stopRenderLoop();
+      if (gameManager.aiWorker) {
+        gameManager.aiWorker.terminate();
+        gameManager.aiWorker = null;
+      }
+      if (gameManager.uiManager && gameManager.uiManager.advancedTexture) {
+        gameManager.uiManager.advancedTexture.dispose();
+      }
+      scene.dispose();
       engine.dispose();
     };
   }, []);
